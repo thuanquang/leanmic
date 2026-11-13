@@ -20,6 +20,7 @@ sealed class StreamServer : IDisposable
     readonly object gate = new();
     TcpClient? current;          // guarded by gate
     string? currentSource;       // "address|name" of the connected phone
+    string? lastRejected;        // last phone told "busy" (to avoid repeating the log line)
 
     /// <summary>(phone name, sample rate, Wi-Fi address or null for USB). Raised on a worker thread.</summary>
     public event Action<string, int, string?>? Connected;
@@ -83,9 +84,15 @@ sealed class StreamServer : IDisposable
                 if (current != null && currentSource != source)
                 {
                     s.WriteByte((byte)'B');
-                    Log.Write($"Rejected {name} via {wifiAddr ?? "USB"}: another phone is connected");
+                    // The rejected phone retries every few seconds; log it once, not every time.
+                    if (lastRejected != source)
+                    {
+                        lastRejected = source;
+                        Log.Write($"Rejected {name} via {wifiAddr ?? "USB"}: another phone is connected");
+                    }
                     return;
                 }
+                lastRejected = null;
                 old = current;
                 current = c;
                 currentSource = source;
@@ -231,14 +238,19 @@ sealed class AdbBridge : IDisposable
                 return;
             }
 
-            if (serials.Count == 0) { Status = "USB: no phone with USB debugging connected"; return; }
+            if (serials.Count == 0) { Status = "USB: no phone with USB debugging plugged in"; return; }
             var ready = new List<string>();
             foreach (var s in serials)
             {
                 try { EnsureReverse(s); ready.Add(s); }
                 catch (Exception e) when (e is IOException or SocketException) { Log.Write($"adb reverse failed for {s}: {e.Message}"); }
             }
-            Status = ready.Count > 0 ? "USB: ready (" + string.Join(", ", ready) + ")" : "USB: phone found but couldn't set up the link";
+            Status = ready.Count switch
+            {
+                0 => "USB: phone found but couldn't set up the link",
+                1 => "USB: ready, phone connected",
+                _ => $"USB: ready, {ready.Count} phones connected",
+            };
         }
         catch (SocketException e) when (e.SocketErrorCode == SocketError.TimedOut) { Status = "USB: adb is busy, retrying…"; }
         catch (Exception e) { Status = "USB: " + e.Message; }

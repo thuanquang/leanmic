@@ -3,11 +3,21 @@
 **Use your Android phone as a wireless or USB microphone for your Windows PC.**
 No ads, no accounts, no telemetry, nothing running in the background except what you started.
 
-- 📱 **Phone app:** 48 KB, Android 10+
-- 🖥️ **PC app:** a single ~550 KB `.exe` that lives in the system tray
+<p align="center">
+  <img src="docs/pc-light.png" width="300" alt="LeanMic on Windows, light theme, live">
+  <img src="docs/pc-dark.png" width="300" alt="LeanMic on Windows, dark theme, noise suppression on">
+</p>
+<p align="center">
+  <img src="docs/phone-live.png" width="200" alt="LeanMic phone app, live">
+  <img src="docs/phone-dark.png" width="200" alt="LeanMic phone app, dark theme, ready to start">
+</p>
+
+- 📱 **Phone app:** tiny (about 64 KB), Android 10+. One big button: tap to go live.
+- 🖥️ **PC app:** a single `.exe` that lives in the system tray
 - ⚡ **Low latency:** about 100–130 ms end to end over USB, and about 120–170 ms over Wi-Fi
 - 🔊 **Volume control:** 0–400% boost on the PC, plus 0–300% mic gain on the phone
 - 🤫 **AI noise suppression:** uses RNNoise to remove hiss, fans and keyboard noise between your words
+- 🌗 **Light and dark:** both apps follow your system theme
 
 LeanMic is a lightweight alternative to phone-as-microphone apps like WO Mic.
 
@@ -23,8 +33,8 @@ LeanMic is a lightweight alternative to phone-as-microphone apps like WO Mic.
 | **Auto-reconnect** | If the link drops (Wi-Fi blip, PC restart), the phone notices within about 4 s and reconnects on its own. |
 | **Screen off** | Keeps streaming with the phone locked, using a foreground service, a wake lock, and a low-latency Wi-Fi lock. |
 | **AI noise suppression** | Optional, on the PC. It chains a 90 Hz low-cut filter, [RNNoise](https://github.com/xiph/rnnoise) neural denoising, and a speech-aware gate. It adds about 10 ms. See [Noise suppression](#noise-suppression). |
-| **PC controls** | Volume, mute, noise suppression, live level meter, output-device picker, and a tray icon that shows the state (idle, live, muted). |
-| **Phone controls** | Mic gain and optional call-style noise suppression / echo cancellation. A Stop button also sits in the notification. |
+| **PC controls** | A big mic button that glows with your voice (click it to mute), volume, noise suppression, output-device picker, built-in connection help, and a tray icon that shows the state (idle, live, muted). It works with keyboard and screen readers. |
+| **Phone controls** | One big start/stop button with a live level ring, Wi-Fi/USB switch, mic gain, and optional call-style echo and noise reduction. A Stop button also sits in the notification. |
 | **One phone at a time** | A second phone gets a clear "another phone is connected" message instead of knocking the first one off. |
 | **Plays nice with adb** | Never launches its own adb while another adb server is running, so other tools' USB connections are never interrupted. |
 
@@ -61,27 +71,29 @@ Download both from the [**latest release**](https://github.com/thuanquang/leanmi
 
 Prefer to build them yourself? See [Building](#building).
 
-### 3. Pick the output
+### 3. Check the output
 
-In the PC app, set **"Send phone audio to"** to **CABLE Input**. It's picked automatically when VB-Cable is installed.
+In the PC app, **"Sends audio to"** should say **CABLE Input**. It's picked automatically when VB-Cable is installed.
+If VB-Cable is missing, the app shows a banner with a download button.
 
 ## Usage
 
 **USB (lowest latency)**
 1. On the phone, enable **Developer options → USB debugging** and plug it into the PC.
-2. Keep LeanMic open on the PC. It sets up the USB link by itself (the *USB: ready* line).
-3. In the phone app, choose **USB** and tap **Start**.
+2. Keep LeanMic open on the PC. It sets up the USB link by itself ("How to connect your phone" shows *Status: ready*).
+3. In the phone app, choose **USB cable** and tap the mic.
 
 USB mode needs `adb` (Android platform-tools) on the PC. LeanMic uses an adb server that's already running.
 If none is running, it starts one from the Android SDK or from an `adb.exe` placed next to `LeanMic.exe`.
 
 **Wi-Fi**
 1. Connect the phone and PC to the same network.
-2. In the phone app, choose **Wi-Fi**, leave the IP empty, and tap **Start**. The phone finds the PC automatically.
-   If your router blocks discovery, type the PC IP shown in the PC app.
+2. In the phone app, choose **Wi-Fi**, leave the PC address empty, and tap the mic. The phone finds the PC automatically.
+   If your router blocks discovery, type the PC's IP, shown under "How to connect your phone" in the PC app.
 
 **Then**, in Discord, Zoom, OBS, Teams or Windows sound settings, choose **"CABLE Output"** as the microphone.
 
+When the mic turns green on both screens, you're live. Click the big mic on the PC to mute or unmute.
 Closing the PC window keeps LeanMic running in the tray. To quit, right-click the tray icon → **Exit**.
 
 ## Latency
@@ -165,11 +177,14 @@ Plain TCP on port **51235**, with UDP **51234** for discovery.
 ```
 android/   Kotlin phone app (no third-party libraries)
   app/src/main/java/com/leanmic/app/
-    MainActivity.kt   UI
+    MainActivity.kt   screen
+    Ui.kt             palette, mic button, segmented control
     MicService.kt     foreground service: capture, discovery, streaming
 pc/        C# WinForms tray app (.NET 9, NAudio)
   Audio.cs     adaptive jitter buffer + WASAPI output
   Denoise.cs   low-cut filter + RNNoise + voice gate
+  Theme.cs     light/dark palette (follows Windows), fonts, drawing helpers
+  Controls.cs  custom-drawn controls (mic orb, toggles, slider, cards)
   Network.cs   TCP server, discovery, adb reverse via the adb socket protocol
   MainForm.cs  UI and tray
 ```

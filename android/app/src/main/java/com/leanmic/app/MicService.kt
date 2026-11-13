@@ -19,6 +19,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.provider.Settings
 import java.io.IOException
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -48,13 +49,21 @@ class MicService : Service() {
 
         @Volatile var running = false
             private set
-        @Volatile var status = "Stopped"
+        @Volatile var state = State.IDLE
+            private set
+        /** Short, human-friendly detail for the current [state]. */
+        @Volatile var status = ""
+            private set
+        /** Peak level (0..1) of the most recent 10 ms of audio sent; for the UI's level ring. */
+        @Volatile var level = 0f
             private set
         /** Software gain applied before sending (1.0 = 100%). Can change while streaming. */
         @Volatile var gain = 1.0f
-        /** Called on the main thread whenever [status] changes. */
+        /** Called on the main thread whenever [state] or [status] changes. */
         var listener: (() -> Unit)? = null
     }
+
+    enum class State { IDLE, SEARCHING, CONNECTING, STREAMING, RETRYING, BUSY, ERROR }
 
     private val main = Handler(Looper.getMainLooper())
     private var worker: Thread? = null
@@ -94,7 +103,7 @@ class MicService : Service() {
             wifiLock = getSystemService(WifiManager::class.java)
                 .createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "LeanMic:wifi").apply { acquire() }
         }
-        setStatus("Starting…")
+        setStatus(State.CONNECTING, "Starting…")
         worker = thread(name = "leanmic-stream") { streamLoop(host, usb, ns) }
         return START_NOT_STICKY
     }
@@ -108,12 +117,16 @@ class MicService : Service() {
         try { worker?.join(500) } catch (_: InterruptedException) {}
         wakeLock?.let { if (it.isHeld) it.release() }
         wifiLock?.let { if (it.isHeld) it.release() }
-        setStatus(fatalError ?: "Stopped")
+        level = 0f
+        val err = fatalError
+        if (err != null) setStatus(State.ERROR, err) else setStatus(State.IDLE, "")
         super.onDestroy()
     }
 
-    private fun setStatus(s: String) {
+    private fun setStatus(st: State, s: String) {
+        state = st
         status = s
+        if (st != State.STREAMING) level = 0f
         main.post {
             listener?.invoke()
             if (running) getSystemService(NotificationManager::class.java).notify(NOTIF_ID, buildNotification(s))
@@ -149,14 +162,14 @@ class MicService : Service() {
 
     private fun failFatal(msg: String) {
         fatalError = msg
-        setStatus(msg)
+        setStatus(State.ERROR, msg)
         main.post { stopSelf() }
     }
 
     private fun streamLoop(fixedHost: String, usb: Boolean, ns: Boolean) {
         var rec = openRecorder(ns)
         if (rec == null) {
-            failFatal("Couldn't open the microphone. Is another app (like WO Mic) using it?")
+            failFatal("Couldn't open the microphone. Is another app using it?")
             return
         }
         val rate = rec.sampleRate
@@ -168,7 +181,7 @@ class MicService : Service() {
                 if (rec == null) {
                     // The previous recorder broke (e.g. Android's audio service restarted): open a fresh one.
                     rec = openRecorder(ns)?.takeIf { it.sampleRate == rate }
-                    if (rec == null) { failFatal("The microphone stopped working. Press Start to try again."); return }
+                    if (rec == null) { failFatal("The microphone stopped working. Tap to try again."); return }
                 }
                 val mic: AudioRecord = rec
                 val target: Pair<String, String>? = when {
@@ -179,7 +192,7 @@ class MicService : Service() {
                 if (target == null) { sleep(500); continue }
                 val (host, label) = target
 
-                setStatus(if (usb) "Connecting over USB…" else "Connecting to $label…")
+                setStatus(State.CONNECTING, if (usb) "Over USB" else label)
                 try {
                     Socket().use { s ->
                         socket = s
@@ -206,25 +219,20 @@ class MicService : Service() {
 
                         val out = s.getOutputStream()
                         try { mic.startRecording() } catch (e: IllegalStateException) { throw MicBroken() }
-                        setStatus(if (usb) "Streaming over USB" else "Streaming to $label")
+                        setStatus(State.STREAMING, if (usb) "Sending to your PC over USB" else "Sending to $label")
                         while (active) {
                             val n = mic.read(frame, 0, frame.size)
                             if (n < 0) throw MicBroken()
                             if (n == 0) continue
                             val g = gain
-                            if (g == 1.0f) {
-                                for (i in 0 until n) {
-                                    val v = frame[i].toInt()
-                                    bytes[2 * i] = v.toByte()
-                                    bytes[2 * i + 1] = (v shr 8).toByte()
-                                }
-                            } else {
-                                for (i in 0 until n) {
-                                    val v = (frame[i] * g).toInt().coerceIn(-32768, 32767)
-                                    bytes[2 * i] = v.toByte()
-                                    bytes[2 * i + 1] = (v shr 8).toByte()
-                                }
+                            var peak = 0
+                            for (i in 0 until n) {
+                                val v = if (g == 1.0f) frame[i].toInt() else (frame[i] * g).toInt().coerceIn(-32768, 32767)
+                                bytes[2 * i] = v.toByte()
+                                bytes[2 * i + 1] = (v shr 8).toByte()
+                                if (v > peak) peak = v else if (-v > peak) peak = -v
                             }
+                            level = peak / 32768f
                             out.write(bytes, 0, n * 2)
                         }
                     }
@@ -232,15 +240,17 @@ class MicService : Service() {
                     try { mic.release() } catch (_: RuntimeException) {}
                     rec = null      // reopened at the top of the loop
                     if (!active) break
-                    setStatus("Microphone was interrupted. Restarting…")
+                    setStatus(State.RETRYING, "The microphone was interrupted. Restarting it…")
                 } catch (e: PcBusy) {
                     if (!active) break
-                    setStatus("Another phone is connected to $label. Waiting for it to stop…")
+                    setStatus(State.BUSY, "Another phone is using LeanMic on this PC. You'll connect as soon as it stops.")
+                    sleep(2000)   // retry every ~3 s while busy (saves battery)
                 } catch (e: IOException) {
                     if (!active) break
                     setStatus(
-                        if (usb) "Waiting for the PC over USB. Is LeanMic open on the PC and USB debugging on?"
-                        else "Lost connection to $label. Retrying…"
+                        State.RETRYING,
+                        if (usb) "Waiting for the PC. Check that LeanMic is open on the PC and USB debugging is on."
+                        else "Lost the connection to $label. Trying again…"
                     )
                 } finally {
                     socket = null
@@ -259,8 +269,12 @@ class MicService : Service() {
     /** The PC already has a different phone connected. */
     private class PcBusy : IOException("PC is busy with another phone")
 
+    /** The name the user gave the phone (e.g. "Galaxy A54 5G"), falling back to the model code. */
+    private fun phoneName(): String =
+        Settings.Global.getString(contentResolver, Settings.Global.DEVICE_NAME)?.takeIf { it.isNotBlank() } ?: Build.MODEL
+
     private fun header(rate: Int): ByteArray {
-        val name = Build.MODEL.toByteArray(Charsets.UTF_8).take(255).toByteArray()
+        val name = phoneName().toByteArray(Charsets.UTF_8).take(255).toByteArray()
         val h = ByteArray(4 + 4 + 2 + 1 + name.size)
         "LMIC".toByteArray(Charsets.US_ASCII).copyInto(h, 0)
         for (i in 0 until 4) h[4 + i] = (rate shr (8 * i)).toByte()
@@ -272,10 +286,10 @@ class MicService : Service() {
 
     /** Broadcasts "LEANMIC?" on the Wi-Fi LAN; the PC app answers "LEANMIC! <pc name>". Returns (ip, label). */
     private fun discover(): Pair<String, String>? {
-        setStatus("Looking for the PC on Wi-Fi…")
+        setStatus(State.SEARCHING, "Make sure LeanMic is open on the PC and both are on the same Wi-Fi.")
         val net = wifiNetwork()
         if (net == null) {
-            setStatus("Wi-Fi is off or not connected.")
+            setStatus(State.RETRYING, "Turn on Wi-Fi and join the same network as your PC.")
             sleep(1500)
             return null
         }

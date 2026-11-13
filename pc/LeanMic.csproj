@@ -13,6 +13,8 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- UI is built in code, never in the WinForms designer. -->
+    <NoWarn>$(NoWarn);WFO1000</NoWarn>
     <!-- Keep the published app a single .exe: bundle rnnoise.dll inside it. -->
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
   </PropertyGroup>

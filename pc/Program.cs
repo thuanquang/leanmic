@@ -12,6 +12,7 @@ static class Program
             return;
         }
         ApplicationConfiguration.Initialize();
+        Theme.Watch();
         Application.Run(new MainForm());
     }
 }
