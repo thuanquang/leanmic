@@ -50,11 +50,13 @@ LeanMic plays your phone's audio into the cable's input, and the cable shows up 
 
 ### 2. Install the apps
 
+Download both from the [**latest release**](https://github.com/thuanquang/leanmic/releases/latest).
+
 - **PC:** run `LeanMic.exe`. It needs the [.NET 9 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/9.0) (x64).
   When Windows Firewall asks, click **Allow**. Wi-Fi mode needs this. If your network is set to *Public*, tick that box too.
 - **Phone:** install `LeanMic.apk`. You may need to allow installing apps from unknown sources.
 
-Both can be built from source; see [Building](#building).
+Prefer to build them yourself? See [Building](#building).
 
 ### 3. Pick the output
 
