@@ -191,7 +191,11 @@ class MicService : Service() {
                         // Wait for the PC to accept; over USB, adb accepts locally even if the PC app is closed.
                         s.soTimeout = 3000
                         val input = s.getInputStream()
-                        if (input.read() != 'K'.code) throw IOException("PC didn't accept the connection")
+                        when (input.read()) {
+                            'K'.code -> {}
+                            'B'.code -> throw PcBusy()
+                            else -> throw IOException("PC didn't accept the connection")
+                        }
 
                         // Heartbeat watchdog: if the PC goes silent (Wi-Fi drop, PC asleep), close and reconnect.
                         s.soTimeout = HEARTBEAT_TIMEOUT_MS
@@ -229,6 +233,9 @@ class MicService : Service() {
                     rec = null      // reopened at the top of the loop
                     if (!active) break
                     setStatus("Microphone was interrupted. Restarting…")
+                } catch (e: PcBusy) {
+                    if (!active) break
+                    setStatus("Another phone is connected to $label. Waiting for it to stop…")
                 } catch (e: IOException) {
                     if (!active) break
                     setStatus(
@@ -248,6 +255,9 @@ class MicService : Service() {
 
     /** The AudioRecord died (read error / can't start); the loop replaces it. */
     private class MicBroken : Exception()
+
+    /** The PC already has a different phone connected. */
+    private class PcBusy : IOException("PC is busy with another phone")
 
     private fun header(rate: Int): ByteArray {
         val name = Build.MODEL.toByteArray(Charsets.UTF_8).take(255).toByteArray()

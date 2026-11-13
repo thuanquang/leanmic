@@ -7,6 +7,7 @@ No ads, no accounts, no telemetry, nothing running in the background except what
 - 🖥️ **PC app:** a single ~550 KB `.exe` that lives in the system tray
 - ⚡ **Low latency:** about 100–130 ms end to end over USB, and about 120–170 ms over Wi-Fi
 - 🔊 **Volume control:** 0–400% boost on the PC, plus 0–300% mic gain on the phone
+- 🤫 **AI noise suppression:** uses RNNoise to remove hiss, fans and keyboard noise between your words
 
 LeanMic is a lightweight alternative to phone-as-microphone apps like WO Mic.
 
@@ -21,8 +22,10 @@ LeanMic is a lightweight alternative to phone-as-microphone apps like WO Mic.
 | **Smooth timing** | A ±1% playback-speed nudge holds the buffer steady and absorbs clock drift between phone and PC with no clicks. It never lets lag pile up. |
 | **Auto-reconnect** | If the link drops (Wi-Fi blip, PC restart), the phone notices within about 4 s and reconnects on its own. |
 | **Screen off** | Keeps streaming with the phone locked, using a foreground service, a wake lock, and a low-latency Wi-Fi lock. |
-| **PC controls** | Volume, mute, live level meter, output-device picker, and a tray icon that shows the state (idle, live, muted). |
-| **Phone controls** | Mic gain and optional noise suppression / echo cancellation. A Stop button also sits in the notification. |
+| **AI noise suppression** | Optional, on the PC. It chains a 90 Hz low-cut filter, [RNNoise](https://github.com/xiph/rnnoise) neural denoising, and a speech-aware gate. It adds about 10 ms. See [Noise suppression](#noise-suppression). |
+| **PC controls** | Volume, mute, noise suppression, live level meter, output-device picker, and a tray icon that shows the state (idle, live, muted). |
+| **Phone controls** | Mic gain and optional call-style noise suppression / echo cancellation. A Stop button also sits in the notification. |
+| **One phone at a time** | A second phone gets a clear "another phone is connected" message instead of knocking the first one off. |
 | **Plays nice with adb** | Never launches its own adb while another adb server is running, so other tools' USB connections are never interrupted. |
 
 ## How it works
@@ -92,6 +95,31 @@ Closing the PC window keeps LeanMic running in the tray. To quit, right-click th
 | **Total** | **~100–130 ms** | **~120–170 ms** |
 
 The PC window shows the current buffer size. For the best Wi-Fi results, use 5 GHz and stay near the router.
+AI noise suppression adds about 10 ms.
+
+## Noise suppression
+
+There are two independent options. Use one, not both.
+
+**PC: "AI noise suppression"** (recommended). The phone audio passes through three stages:
+1. A **90 Hz low-cut filter** removes hum, rumble and desk thumps.
+2. **RNNoise**, a small neural network trained to separate speech from noise, cleans each 10 ms frame.
+3. A **voice gate** uses RNNoise's speech detection. When you're not talking, leftover noise drops a further 20 dB.
+   It opens instantly when you speak and holds for 300 ms, so the starts and ends of words aren't cut off.
+
+Measured on speech mixed with loud noise (noise only about 6 dB quieter than the voice):
+
+| Noise | Removed between words | Voice clarity gain |
+|---|---|---|
+| Hiss, fans, air conditioning | 26 dB | +8.6 dB |
+| Keyboard clicks | 23 dB | +5.7 dB |
+| Electrical hum | 6 dB | +7.4 dB |
+| Other people talking | — | — (no lightweight denoiser can separate voices) |
+
+**Phone: "Noise suppression / echo cancel"** switches on the phone's own call processing.
+Use it mainly if your speakers' sound echoes back into the mic.
+
+If your chat app already has noise suppression (for example Discord's Krisp), you can leave both LeanMic options off.
 
 ## Troubleshooting
 
@@ -102,7 +130,9 @@ The PC window shows the current buffer size. For the best Wi-Fi results, use 5 G
 | PC shows *"USB: needs Android platform-tools"* | Install [platform-tools](https://developer.android.com/tools/releases/platform-tools), or drop `adb.exe` and its DLLs next to `LeanMic.exe`. Wi-Fi works without it. |
 | Apps don't list "CABLE Output" | Install VB-Cable and restart the PC (see Setup). |
 | Too quiet or too loud | Use the PC volume slider (up to 400%) or the phone's mic gain. The meter turns yellow or red near clipping. |
+| Background noise | Turn on **AI noise suppression** in the PC app. |
 | Echo in calls | Turn on **Noise suppression / echo cancel** on the phone. |
+| Phone says *"Another phone is connected"* | The PC streams from one phone at a time. Stop LeanMic on the other phone. |
 
 Logs and settings are stored in `%APPDATA%\LeanMic`.
 
@@ -128,7 +158,7 @@ Plain TCP on port **51235**, with UDP **51234** for discovery.
 
 - **Discovery:** the phone broadcasts `LEANMIC?` and the PC replies `LEANMIC! <pc-name>`.
 - **Stream:** the phone sends `"LMIC"`, `u32 sampleRate`, `u16 channels(=1)`, `u8 nameLen`, `name`, then raw `s16le` PCM. All integers are little-endian.
-- **PC → phone:** `K` when the header is accepted, then 1 byte per second as a heartbeat. The phone treats 4 s of silence as a dead link.
+- **PC → phone:** `K` when the header is accepted, or `B` if another phone is already connected. After `K`, the PC sends 1 byte per second as a heartbeat, and the phone treats 4 s of silence as a dead link.
 
 ## Project layout
 
@@ -139,10 +169,11 @@ android/   Kotlin phone app (no third-party libraries)
     MicService.kt     foreground service: capture, discovery, streaming
 pc/        C# WinForms tray app (.NET 9, NAudio)
   Audio.cs     adaptive jitter buffer + WASAPI output
+  Denoise.cs   low-cut filter + RNNoise + voice gate
   Network.cs   TCP server, discovery, adb reverse via the adb socket protocol
   MainForm.cs  UI and tray
 ```
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). Third-party components (RNNoise, NAudio) are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

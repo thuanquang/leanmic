@@ -27,6 +27,8 @@ sealed class MainForm : Form
     readonly Label volLabel = new() { AutoSize = true };
     readonly TrackBar vol = new() { Minimum = 0, Maximum = 400, TickFrequency = 50, SmallChange = 5, LargeChange = 25, Width = W };
     readonly CheckBox mute = new() { Text = "Mute", AutoSize = true };
+    readonly CheckBox denoise = new() { Text = "AI noise suppression (removes hiss, fans, keyboard between words)", AutoSize = true, MaximumSize = new Size(W, 0) };
+    readonly ToolStripMenuItem trayDenoise = new("Noise suppression");
     readonly LevelMeter meter = new() { Width = W };
     readonly Label delayLabel = new() { AutoSize = true, ForeColor = SystemColors.GrayText };
     readonly NotifyIcon tray = new() { Text = "LeanMic" };
@@ -41,6 +43,8 @@ sealed class MainForm : Form
     bool phoneUsb, cableMissing, exiting, hintShown, loadingDevices;
     string? shownWarning;
     int tick;
+    float vadSum;
+    int vadCount;
 
     public MainForm()
     {
@@ -79,27 +83,38 @@ sealed class MainForm : Form
         layout.Controls.AddRange([
             Gap(0, W), status, wifiLabel, usbLabel, Gap(10),
             new Label { Text = "Send phone audio to:", AutoSize = true }, devices, warn, Gap(6),
-            volLabel, vol, mute, Gap(4), meter, delayLabel, Gap(8), hint,
+            volLabel, vol, mute, denoise, Gap(4), meter, delayLabel, Gap(8), hint,
         ]);
         Controls.Add(layout);
 
         vol.Value = Math.Clamp(settings.Volume, 0, 400);
         mute.Checked = trayMute.Checked = settings.Muted;
+        denoise.Checked = trayDenoise.Checked = settings.NoiseSuppression;
         engine.Volume = vol.Value / 100f;
         engine.Muted = mute.Checked;
+        engine.NoiseSuppression = denoise.Checked;
         UpdateVolumeLabel();
 
         vol.ValueChanged += (_, _) => { engine.Volume = vol.Value / 100f; settings.Volume = vol.Value; UpdateVolumeLabel(); };
         vol.MouseUp += (_, _) => settings.Save();
         vol.KeyUp += (_, _) => settings.Save();
         mute.CheckedChanged += (_, _) => ApplyMute();
+        denoise.CheckedChanged += (_, _) =>
+        {
+            engine.NoiseSuppression = trayDenoise.Checked = denoise.Checked;
+            settings.NoiseSuppression = denoise.Checked;
+            settings.Save();
+            Log.Write("Noise suppression " + (denoise.Checked ? "on" : "off"));
+        };
         devices.SelectedIndexChanged += (_, _) => { if (!loadingDevices) SelectDevice(); };
         devices.DropDown += (_, _) => { if (LoadDevices()) SelectDevice(); };   // picks up devices added/removed since startup
 
         trayMute.Click += (_, _) => mute.Checked = !mute.Checked;
+        trayDenoise.Click += (_, _) => denoise.Checked = !denoise.Checked;
         tray.ContextMenuStrip = new ContextMenuStrip();
         tray.ContextMenuStrip.Items.Add("Show LeanMic", null, (_, _) => ShowWindow());
         tray.ContextMenuStrip.Items.Add(trayMute);
+        tray.ContextMenuStrip.Items.Add(trayDenoise);
         tray.ContextMenuStrip.Items.Add(new ToolStripSeparator());
         tray.ContextMenuStrip.Items.Add("Exit", null, (_, _) => { exiting = true; Close(); });
         tray.DoubleClick += (_, _) => ShowWindow();
@@ -221,7 +236,7 @@ sealed class MainForm : Form
             : "";
 
         // Output errors take priority over the VB-Cable hint.
-        string? w = engine.Error ?? (cableMissing ? CableHelp : null);
+        string? w = engine.Error ?? engine.NoiseSuppressionError ?? (cableMissing ? CableHelp : null);
         if (w != shownWarning)
         {
             shownWarning = w;
@@ -231,8 +246,14 @@ sealed class MainForm : Form
             warn.LinkArea = at >= 0 ? new LinkArea(at, 18) : new LinkArea(0, 0);
         }
 
+        float vad = engine.VoiceProbability;
+        if (vad >= 0) { vadSum += vad; vadCount++; }
         if (phone != null && jb != null && tick % 40 == 0)
-            Log.Write($"stats: meter {meter.Level:0.000} buffer {jb.BufferedMs} ms target {jb.TargetMs} ms underruns {jb.Underruns} volume {vol.Value}% muted {mute.Checked}");
+        {
+            string ns = vadCount > 0 ? $" voice {vadSum / vadCount:0.00}" : "";
+            vadSum = 0; vadCount = 0;
+            Log.Write($"stats: meter {meter.Level:0.000} buffer {jb.BufferedMs} ms target {jb.TargetMs} ms underruns {jb.Underruns} volume {vol.Value}% muted {mute.Checked}{ns}");
+        }
     }
 
     void ShowWindow()

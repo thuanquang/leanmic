@@ -44,6 +44,7 @@ sealed class Settings
     public string? DeviceId { get; set; }
     public int Volume { get; set; } = 100;
     public bool Muted { get; set; }
+    public bool NoiseSuppression { get; set; }
 
     public static Settings Load()
     {

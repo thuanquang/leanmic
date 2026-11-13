@@ -72,16 +72,16 @@ sealed class JitterBuffer : ISampleProvider
     /// <summary>Drop buffered audio (stream ended) without counting it as an underrun.</summary>
     public void Clear() { lock (gate) { count = 0; frac = 0; primed = false; } }
 
-    public void Write(byte[] data, int offset, int bytes)
+    /// <summary>Appends samples (-1..1).</summary>
+    public void Write(ReadOnlySpan<float> samples)
     {
         lock (gate)
         {
             int len = ring.Length;
-            for (int i = 0; i + 1 < bytes; i += 2)
+            foreach (float s in samples)
             {
-                short s = (short)(data[offset + i] | (data[offset + i + 1] << 8));
                 if (count == len) { head = (head + 1) % len; count--; }
-                ring[(head + count) % len] = s / 32768f;
+                ring[(head + count) % len] = s;
                 count++;
             }
             int target = targetMs * msSamples;
@@ -190,8 +190,52 @@ sealed class AudioEngine : IDisposable
     volatile JitterBuffer? buffer;
     volatile string? error;
 
+    // Network-thread input path (guarded by writeGate).
+    readonly object writeGate = new();
+    float[] pcm = new float[2048];
+    NoiseSuppressor? denoiser;
+    JitterBuffer? emitTarget;
+    readonly Action<float[], int> emitToBuffer;
+    bool noiseSuppression;
+
+    public AudioEngine() => emitToBuffer = (f, n) => emitTarget?.Write(f.AsSpan(0, n));
+
     public JitterBuffer? Buffer { get => buffer; private set => buffer = value; }
     public string? Error { get => error; private set => error = value; }
+
+    /// <summary>Speech probability of the latest 10 ms frame, or -1 when suppression isn't running.</summary>
+    public float VoiceProbability => denoiser?.VoiceProbability ?? -1f;
+
+    /// <summary>Why AI noise suppression can't run, or null.</summary>
+    public string? NoiseSuppressionError { get; private set; }
+
+    /// <summary>RNNoise-based cleanup of the phone audio (48 kHz streams only).</summary>
+    public bool NoiseSuppression
+    {
+        get => noiseSuppression;
+        set { noiseSuppression = value; ResetDenoiser(); }
+    }
+
+    /// <summary>(Re)creates the suppressor with fresh state, or removes it when switched off.</summary>
+    void ResetDenoiser()
+    {
+        lock (writeGate)
+        {
+            denoiser?.Dispose();
+            denoiser = null;
+            if (!noiseSuppression || rate != NoiseSuppressor.SampleRate) return;
+            try
+            {
+                denoiser = new NoiseSuppressor();
+                NoiseSuppressionError = null;
+            }
+            catch (Exception e)
+            {
+                NoiseSuppressionError = "Noise suppression unavailable: " + e.Message;
+                Log.Write(NoiseSuppressionError);
+            }
+        }
+    }
 
     public float Volume { get => volume; set { volume = value; if (Buffer != null) Buffer.Volume = value; } }
     public bool Muted { get => muted; set { muted = value; if (Buffer != null) Buffer.Muted = value; } }
@@ -210,6 +254,7 @@ sealed class AudioEngine : IDisposable
             Rebuild();
         }
         Buffer?.Reset(usb);
+        ResetDenoiser();   // fresh noise model per connection (also handles a sample-rate change)
     }
 
     /// <summary>Called periodically: reopens the output if it died or failed to open (retries every 3 s).</summary>
@@ -222,7 +267,26 @@ sealed class AudioEngine : IDisposable
         Rebuild();
     }
 
-    public void Write(byte[] data, int offset, int count) => Buffer?.Write(data, offset, count);
+    /// <summary>Called on the network thread with 16-bit little-endian PCM.</summary>
+    public void Write(byte[] data, int offset, int count)
+    {
+        lock (writeGate)
+        {
+            var jb = Buffer;
+            if (jb == null) return;
+            int n = count / 2;
+            if (pcm.Length < n) pcm = new float[n];
+            for (int i = 0; i < n; i++)
+                pcm[i] = (short)(data[offset + 2 * i] | (data[offset + 2 * i + 1] << 8)) / 32768f;
+
+            if (denoiser != null)
+            {
+                emitTarget = jb;
+                denoiser.Process(pcm.AsSpan(0, n), emitToBuffer);
+            }
+            else jb.Write(pcm.AsSpan(0, n));
+        }
+    }
 
     void Rebuild()
     {
@@ -277,6 +341,7 @@ sealed class AudioEngine : IDisposable
     public void Dispose()
     {
         StopOutput();
+        lock (writeGate) { denoiser?.Dispose(); denoiser = null; }
         enumerator.Dispose();
     }
 }

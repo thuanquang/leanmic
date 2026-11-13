@@ -17,7 +17,9 @@ sealed class StreamServer : IDisposable
     readonly CancellationTokenSource cts = new();
     TcpListener? tcp;
     UdpClient? udp;
-    TcpClient? current;
+    readonly object gate = new();
+    TcpClient? current;          // guarded by gate
+    string? currentSource;       // "address|name" of the connected phone
 
     /// <summary>(phone name, sample rate, Wi-Fi address or null for USB). Raised on a worker thread.</summary>
     public event Action<string, int, string?>? Connected;
@@ -67,13 +69,29 @@ sealed class StreamServer : IDisposable
             string name = Encoding.UTF8.GetString(ReadExact(s, h[10]));
             if (channels != 1 || rate < 8000 || rate > 192000) return;
 
-            // Valid phone: it replaces whichever phone was connected before (stray connections never do).
-            Interlocked.Exchange(ref current, c)?.Dispose();
-            active = true;
-
             var remote = ((IPEndPoint)c.Client.RemoteEndPoint!).Address;
             // USB traffic arrives through the local adb server, so it looks like loopback.
             string? wifiAddr = IPAddress.IsLoopback(remote) ? null : remote.MapToIPv4().ToString();
+            string source = (wifiAddr ?? "usb") + "|" + name;
+
+            // One phone at a time. The same phone reconnecting may replace its own stale connection;
+            // a different phone is told the PC is busy (otherwise two auto-reconnecting phones would
+            // keep kicking each other off).
+            TcpClient? old;
+            lock (gate)
+            {
+                if (current != null && currentSource != source)
+                {
+                    s.WriteByte((byte)'B');
+                    Log.Write($"Rejected {name} via {wifiAddr ?? "USB"}: another phone is connected");
+                    return;
+                }
+                old = current;
+                current = c;
+                currentSource = source;
+            }
+            old?.Dispose();
+            active = true;
             Log.Write($"Phone connected: {name} {rate} Hz via {wifiAddr ?? "USB"}");
             Connected?.Invoke(name, rate, wifiAddr);
 
@@ -99,7 +117,11 @@ sealed class StreamServer : IDisposable
         finally
         {
             c.Dispose();
-            if (active && Interlocked.CompareExchange(ref current, null, c) == c)
+            bool wasCurrent = false;
+            if (active)
+                lock (gate)
+                    if (current == c) { current = null; currentSource = null; wasCurrent = true; }
+            if (wasCurrent)
             {
                 Log.Write("Phone disconnected");
                 Disconnected?.Invoke();
@@ -161,7 +183,7 @@ sealed class StreamServer : IDisposable
         cts.Cancel();
         tcp?.Stop();
         udp?.Dispose();
-        current?.Dispose();
+        lock (gate) current?.Dispose();
     }
 }
 
