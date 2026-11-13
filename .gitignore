@@ -1,0 +1,18 @@
+# Build output
+dist/
+pc/bin/
+pc/obj/
+android/.gradle/
+android/build/
+android/app/build/
+android/.kotlin/
+*.apk
+
+# Local machine config
+android/local.properties
+.idea/
+.vs/
+*.user
+
+# Stray log some Windows tools write to a file named NUL
+NUL
